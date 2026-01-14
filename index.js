@@ -1,8 +1,8 @@
 const http = require('http');
-http.createServer((req, res) => { res.write("Bot aktif!"); res.end(); }).listen(process.env.PORT || 8080);
+http.createServer((req, res) => { res.write("Bot Aktif!"); res.end(); }).listen(process.env.PORT || 10000);
 
-const { Client, GatewayIntentBits } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus } = require('@discordjs/voice');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, NoSubscriberBehavior } = require('@discordjs/voice');
 const play = require('play-dl');
 const fs = require('fs');
 
@@ -11,57 +11,65 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildVoiceStates,
-        GatewayIntentBits.GuildMembers
+        GatewayIntentBits.GuildVoiceStates
     ]
 });
-const prefix = "!";
 
-// Odaya girince çalma özelliği
-client.on('voiceStateUpdate', async (oldState, newState) => {
-    // Birisi odaya girdi mi? (Bot değilse ve yeni bir kanala girdiyse)
-    if (!oldState.channelId && newState.channelId && !newState.member.user.bot) {
+const commands = [
+    new SlashCommandBuilder()
+        .setName('intro')
+        .setDescription('Odaya girdiğinde çalacak müziği ayarlar.')
+        .addStringOption(option => option.setName('link').setDescription('YouTube Linki').setRequired(true))
+].map(command => command.toJSON());
+
+const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+
+client.on('ready', async () => {
+    try {
+        await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+        console.log(`Bot Giriş Yaptı: ${client.user.tag}`);
+    } catch (e) { console.error("Komut yükleme hatası:", e); }
+});
+
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isChatInputCommand()) return;
+    if (interaction.commandName === 'intro') {
+        const url = interaction.options.getString('link');
+        if (!url.includes('youtube.com') && !url.includes('youtu.be')) return interaction.reply("Geçerli bir YouTube linki ver!");
         
-        const introlar = JSON.parse(fs.readFileSync('./introlar.json', 'utf8'));
-        const userIntro = introlar[newState.member.id];
-
-        if (userIntro) {
-            const connection = joinVoiceChannel({
-                channelId: newState.channelId,
-                guildId: newState.guild.id,
-                adapterCreator: newState.guild.voiceAdapterCreator,
-            });
-
-            try {
-                const stream = await play.stream(userIntro);
-                const resource = createAudioResource(stream.stream, { inputType: stream.type });
-                const player = createAudioPlayer();
-                player.play(resource);
-                connection.subscribe(player);
-                
-                // Müzik bitince odadan çıkması için (isteğe bağlı)
-                player.on(AudioPlayerStatus.Idle, () => connection.destroy());
-            } catch (e) { console.error("Çalma hatası:", e); }
-        }
+        let introlar = {};
+        if (fs.existsSync('./introlar.json')) introlar = JSON.parse(fs.readFileSync('./introlar.json'));
+        introlar[interaction.user.id] = url;
+        fs.writeFileSync('./introlar.json', JSON.stringify(introlar, null, 2));
+        
+        await interaction.reply(`✅ İntron kaydedildi: ${url}`);
     }
 });
 
-// Komutlar
-client.on('messageCreate', async (message) => {
-    if (message.author.bot || !message.content.startsWith(prefix)) return;
-    const args = message.content.slice(prefix.length).trim().split(/ +/);
-    const command = args.shift().toLowerCase();
+client.on('voiceStateUpdate', async (oldState, newState) => {
+    if (!oldState.channelId && newState.channelId && !newState.member.user.bot) {
+        if (!fs.existsSync('./introlar.json')) return;
+        const introlar = JSON.parse(fs.readFileSync('./introlar.json'));
+        const userIntro = introlar[newState.member.id];
 
-    // !intro https://youtube... (Müziğini kaydeder)
-    if (command === 'intro') {
-        const url = args[0];
-        if (!url || !url.includes('youtube.com')) return message.reply("Lütfen geçerli bir YouTube linki ver!");
-        
-        const introlar = JSON.parse(fs.readFileSync('./introlar.json', 'utf8'));
-        introlar[message.author.id] = url; // Senin ID'ne bu linki kaydetti
-        
-        fs.writeFileSync('./introlar.json', JSON.stringify(introlar, null, 2));
-        message.reply("✅ İntron başarıyla kaydedildi! Artık odaya girdiğinde bu çalacak.");
+        if (userIntro) {
+            try {
+                const connection = joinVoiceChannel({
+                    channelId: newState.channelId,
+                    guildId: newState.guild.id,
+                    adapterCreator: newState.guild.voiceAdapterCreator,
+                });
+
+                const stream = await play.stream(userIntro);
+                const resource = createAudioResource(stream.stream, { inputType: stream.type });
+                const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
+                
+                player.play(resource);
+                connection.subscribe(player);
+                
+                player.on(AudioPlayerStatus.Idle, () => connection.destroy());
+            } catch (e) { console.error("Ses çalınamadı:", e); }
+        }
     }
 });
 
